@@ -1,0 +1,50 @@
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: eureka-ingress
+  namespace: default
+spec:
+  rules:
+  - host: eureka.k8s.irootechapp.com
+    http:
+      paths:
+      - path: /
+        backend:
+          serviceName: eureka
+          servicePort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eureka
+spec:
+  ports:
+    - port: 80
+      targetPort: 80
+  selector:
+    app: eureka
+---
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: eureka-deployment
+spec:
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: eureka
+    spec:
+      containers:
+      - name: eureka
+        image: docker-registry.irootechapp.com:5000/eureka:v1
+        ports:
+        - containerPort: 80
+        env:
+        - name: JAVA_OPTS
+          value: "-Xmx1500m -Dserver.port=80 -Dspring.cloud.config.profile=prod,route,qa -DTZ=Asia/Hong_Kong"  
+
+
+
+

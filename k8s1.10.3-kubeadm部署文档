@@ -1,0 +1,196 @@
+1.更换yum源
+cd /et/yum.repos.d/
+rm -rf *
+wget -O /etc/yum.repos.d/CentOS-Base.repo http://mirrors.aliyun.com/repo/Centos-7.repo
+wget -P /etc/yum.repos.d/ http://mirrors.aliyun.com/repo/epel-7.repo
+yum clean all 
+yum makecache
+
+2.关闭防火墙
+systemctl stop firewalld
+systemctl disable firewalld
+
+3.禁用SELinux
+setenforce 0
+编辑文件/etc/selinux/config，将SELINUX修改为disabled
+
+4.关闭系统swap
+swapoff -a
+修改/etc/fstab文件，注释掉SWAP的自动挂载，使用free -m确认swap已经关闭
+
+5.安装docker（参考：https://docs.docker.com/install/linux/docker-ce/centos/#set-up-the-repository） 
+mkdir ~/k8s
+cd k8s
+wget https://download.docker.com/linux/centos/7/x86_64/stable/Packages/docker-ce-selinux-17.03.2.ce-1.el7.centos.noarch.rpm
+wget https://download.docker.com/linux/centos/7/x86_64/stable/Packages/docker-ce-17.03.2.ce-1.el7.centos.x86_64.rpm
+
+cd ~/k8s
+yum install ./docker-ce-selinux-17.03.2.ce-1.el7.centos.noarch.rpm
+yum install ./docker-ce-17.03.2.ce-1.el7.centos.x86_64.rpm
+systemctl enable docker
+systemctl start docker
+
+6.配置docker
+1)开启iptables filter表的FORWARD链 
+编辑/lib/systemd/system/docker.service，在ExecStart=..上面加入如下内容：
+   ExecStartPost=/usr/sbin/iptables -I FORWARD -s 0.0.0.0/0 -j ACCEPT
+如下：
+	ExecStartPost=/usr/sbin/iptables -I FORWARD -s 0.0.0.0/0 -j ACCEPT
+	ExecStart=/usr/bin/dockerd
+2)配置Cgroup Driver 
+创建文件/etc/docker/daemon.json，添加如下内容：
+{
+  "exec-opts": ["native.cgroupdriver=systemd"]
+}
+
+3)重启docker
+systemctl daemon-reload && systemctl restart docker && systemctl status docker
+
+7.配置翻墙代理
+1)shandowsocks
+	yum -y install python-pip
+	pip install shadowsocks
+配置：
+	mkdir /etc/shadowsocks
+	vi /etc/shadowsocks/shadowsocks.json
+	配置信息：
+	{
+	"server": "ip-address",
+	"server_port": 9000,
+	"local_address": "127.0.0.1",
+	"local_port": 1080,
+	"password": "*****",
+	"timeout": 300,
+	"method": "aes-256-cfb",
+	"fast_open": false,
+	"workers": 1
+	}
+启动脚本文件：
+	vim /etc/systemd/system/shadowsocks.service
+
+	[Unit]
+	Description=Shadowsocks
+	[Service]
+	TimeoutStartSec=0
+	ExecStart=/usr/bin/sslocal -c /etc/shadowsocks/shadowsocks.json
+	[Install]
+	WantedBy=multi-user.target
+启动：
+	systemctl enable shadowsocks.service
+	systemctl start shadowsocks.service
+	systemctl status shadowsocks.service
+
+2)安装配置privoxy
+	yum -y install privoxy
+配置：
+	vi /etc/privoxy/config
+	listen-address 127.0.0.1:8118 # 8118 是默认端口，不用改
+	forward-socks5t / 127.0.0.1:1080 . #转发到本地端口
+启动：
+	systemctl enable privoxy
+	systemctl start privoxy
+	systemctl status privoxy
+
+3)配置docker代理
+	mkdir -p /etc/systemd/system/docker.service.d
+	vi /etc/systemd/system/docker.service.d/http-proxy.conf
+	[Service]
+	Environment="HTTP_PROXY=http://127.0.0.1:8118" "NO_PROXY=localhost,10.10.82.186,10.192.168.0.0/16,127.0.0.1,10.244.0.0/16"
+	备注：no_proxy加上虚拟机Ip
+	vi /etc/systemd/system/docker.service.d/https-proxy.conf
+	[Service]
+	Environment="HTTPS_PROXY=https://127.0.0.1:8118" "NO_PROXY=localhost,10.10.82.186,192.168.0.0/16,127.0.0.1,10.244.0.0/16"
+    重启docker
+    systemctl daemon-reload && systemctl restart docker
+	查看配置是否成功
+	systemctl show --property=Environment docker | more
+4)配置yum代理
+	vim /etc/yum.conf
+	proxy=http://127.0.0.1:8118
+
+8.安装kubernetes
+1)配置软件源
+cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+EOF
+yum makecache
+2)解决路由异常
+cat <<EOF >  /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+EOF
+sysctl --system
+3)调整swappiness参数 
+修改/etc/sysctl.d/k8s.conf添加下面一行：
+vm.swappiness=0
+sysctl -p /etc/sysctl.d/k8s.conf
+
+4)安装指定版本
+  yum install kubeadm kubectl kubelet
+
+9.使用kubeadm init初始化集群(master节点)
+
+kubeadm init --kubernetes-version=v1.10.3 --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=master-ip
+
+kubectl get cs  //查看组件状态
+kubeadm join 10.70.24.9:6443 --token 1qvwl5.x4b32dq0q4wqbx2t --discovery-token-ca-cert-hash sha256:17e43da771911970b1ebe89ab4d8d0ab4e29ff590b34db160a282aae4ed4bb1a  //加入node
+
+
+10.安装fannel (master节点)
+ cd ~/k8s
+ wget https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+ kubectl apply -f  kube-flannel.yml
+参考：https://www.zybuluo.com/ncepuwanghui/note/953929
+
+
+11.安装dashboard
+1)install
+  kubectl crate -f  https://raw.githubusercontent.com/kubernetes/dashboard/master/src/deploy/recommended/kubernetes-dashboard.yaml
+2)授权
+  vim dashboard-admin.yaml
+	apiVersion: rbac.authorization.k8s.io/v1beta1
+	kind: ClusterRoleBinding
+	metadata:
+	   name: kubernetes-dashboard
+	   labels:
+	     k8s-app: kubernetes-dashboard
+	roleRef:
+	   apiGroup: rbac.authorization.k8s.io
+	   kind: ClusterRole
+	   name: cluster-admin
+	subjects:
+	-  kind: ServiceAccount
+	   name: kubernetes-dashboard
+	   namespace: kube-system
+  kubectl create -f dashboard-admin.yaml
+ 
+3)配置代理
+nohup kubectl proxy --address="10.10.84.188" -p 443 --accept-hosts='^*$' &
+4)获取tocken
+kubectl -n kube-system get secret |grep dashboard
+kubectl describe secret kubernetes-dashboard-token  -n kube-system
+问题处理：
+1)windows无法访问kubernetes问题
+$ mkdir certs
+$ openssl req -nodes -newkey rsa:2048 -keyout certs/dashboard.key -out certs/dashboard.csr -subj "/C=/ST=/L=/O=/OU=/CN=kubernetes-dashboard"
+$ openssl x509 -req -sha256 -days 365 -in certs/dashboard.csr -signkey certs/dashboard.key -out certs/dashboard.crt
+$ kubectl create secret generic kubernetes-dashboard-certs --from-file=certs -n kube-system
+$ kubectl create -f kubernetes-dashboard.yaml
+                       
+2)腾讯云部署需要配置静态主机名
+hostnamectl status   //查看当前主机名
+hostnamectl set-hostname name  //配置主机名
+
+2)kubeadm重启集群
+kubeadm reset
+rm -rf /var/lib/cni
+
+
+
+
